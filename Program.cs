@@ -26,11 +26,12 @@ namespace DNSTest {
                 {
                     AllowMultipleArgumentsPerToken = false, IsRequired = true 
                     //Argument = new Argument<IPAddress>(parse: v=>{Console.Out.WriteLine("here");  return IPAddress.Parse(v.Tokens.Single().Value); })
-                }
+                },
+                new Option<bool>(alias:"UseUdp", getDefaultValue: ()=>false)
             };
 
-            rootCommand.Handler = CommandHandler.Create<FileSystemInfo, int,string[],IPAddress>(
-                (dictionaryFile ,iterations, topLevelDomains, resolver) => new Program().RunLinqPad(dictionaryFile,iterations, topLevelDmains: topLevelDomains, dnsServer: resolver));
+            rootCommand.Handler = CommandHandler.Create<FileSystemInfo, int,string[],IPAddress,bool>(
+                (dictionaryFile ,iterations, topLevelDomains, resolver, UseUdp) => new Program().RunLinqPad(dictionaryFile,iterations, topLevelDmains: topLevelDomains, dnsServer: resolver, UseUDPOnly:UseUdp));
             rootCommand.Invoke(args);
         }
 
@@ -47,13 +48,14 @@ namespace DNSTest {
             return null;
         }
 
-        void RunLinqPad(FileSystemInfo domainNameList, int iterations, string[] topLevelDmains, IPAddress dnsServer = null)
+        void RunLinqPad(FileSystemInfo domainNameList, int iterations, string[] topLevelDmains, IPAddress dnsServer = null, bool UseUDPOnly = false)
         {
             var settings = dnsServer == null ? new LookupClientOptions() : new LookupClientOptions(dnsServer);
             settings.EnableAuditTrail = true;
             settings.Timeout = TimeSpan.FromSeconds(10);
             settings.Recursion = true;
-
+            settings.UseTcpFallback = UseUDPOnly ? false : true;
+            
             var lc = new LookupClient(settings);
 
             var words = File.ReadAllLines(domainNameList.FullName);
@@ -68,29 +70,39 @@ namespace DNSTest {
                 domains.Add($"{alleged}.{topLevelDmains[random.Next(0, topLevelDmains.Length)]}");
             }
 
-            var errors = new ConcurrentDictionary<string, Task<TimedResponse>>();
+            var queryResults = new ConcurrentDictionary<string, Task<TimedResponse>>();
 
 
             Parallel.ForEach(domains, domain =>
             {
                 var sw = Stopwatch.StartNew();
 
-                errors.TryAdd(domain, lc.QueryAsync(domain, QueryType.A).ContinueWith(v=> { sw.Stop(); return new TimedResponse { Response = v.Result, TimeTaken = sw.Elapsed }; }));
+                queryResults.TryAdd(domain, lc.QueryAsync(domain, QueryType.A).ContinueWith(v=> { sw.Stop(); return new TimedResponse { Response = v.Result, TimeTaken = sw.Elapsed }; }));
             });
 
-            Console.WriteLine($"Waiting for {errors.Count} requests to complete");
-            Task.WhenAll(errors.Values).Wait();
+            Console.WriteLine($"Waiting for {queryResults.Count} requests to complete");
+            Task.WhenAll(queryResults.Values).Wait();
 
-            foreach (var thing in errors
+
+            var errors = queryResults
                 .Where(e => e.Value.Result.Response.HasError)// && e.Value.Result.Header.ResponseCode != DnsClient.DnsHeaderResponseCode.NotExistentDomain)
+                .ToList();
+            foreach (var thing in errors
                 .Select(e => new { Name = e.Key, Response = e.Value.Result }))
             {
                 Console.WriteLine("lookup failure for {0} of {1}, but took {2} milliseconds",thing.Name, thing.Response.Response.ErrorMessage, thing.Response.TimeTaken.TotalMilliseconds);
             }
 
-            var success = errors
+            // summary of errors
+            foreach (var errorGroup in errors.GroupBy(e => e.Value.Result.Response.ErrorMessage))
+            {
+                Console.WriteLine($"{errorGroup.Key} has {errorGroup.Count()} instances");
+            }
+
+            var success = queryResults
                 .Where(e => !e.Value.Result.Response.HasError).ToList();
-            Console.WriteLine($"Successfully processed {success.Count()}, in an average of {success.Average(v=>v.Value.Result.TimeTaken.TotalMilliseconds)} milliseconds");
+            if (success.Any())
+                Console.WriteLine($"Successfully processed {success.Count()}, in an average of {success.Average(v=>v.Value.Result.TimeTaken.TotalMilliseconds)} milliseconds");
         }
     }
 
