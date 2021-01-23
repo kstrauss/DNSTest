@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "DNSTest": {
+      "commandName": "Project"
+    },
+    "Docker": {
+      "commandName": "Docker"
+    }
+  }
+}
